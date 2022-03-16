@@ -88,3 +88,11 @@ def AvoidBranchingStatementAsLastInLoop(cfg, data):
             stmt = astTop(stmt)
         if match(stmt, "break|continue|return"):
             cppcheck.reportError(stmt, "style", "Branching statement as the last statement inside a loop is very confusing.")
+
+@cppcheck.checker
+def CollapsibleIfStatements(cfg, data):
+    for token in cfg.tokenlist:
+        if not match(token, "if (*) { if (*) {*} }"):
+            continue
+        cppcheck.reportError(token, "style", "These two if statements can be collapsed into one.")
+
