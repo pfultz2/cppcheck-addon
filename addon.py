@@ -1,122 +1,5 @@
-import cppcheck, itertools, cppcheckdata
-from cppcheckdata import simpleMatch
-
-def forward(token, end=None, skip_links=None):
-    while token and token != end:
-        yield token
-        if token.link and token.str in (skip_links or []):
-            token = token.link
-        token = token.next
-
-def backward(token, end=None, skip_links=None):
-    while token and token != end:
-        yield token
-        if token.link and token.str in (skip_links or []):
-            token = token.link
-        token = token.previous
-
-def astParents(token):
-    while token and token.astParent:
-        token = token.astParent
-        yield token
-
-def astTop(token):
-    top = None
-    for parent in astParents(token):
-        top = parent
-    return top
-
-def tokAt(token, n):
-    tl = forward(token)
-    if n < 0:
-        tl = backward(token)
-        n = -n
-    for i, t in enumerate(tl):
-        if i == n:
-            return t
-
-patterns = {
-    '%any%': lambda tok: tok,
-    '%assign%': lambda tok: tok if tok.isAssignmentOp else None,
-    '%comp%': lambda tok: tok if tok.isComparisonOp else None,
-    '%name%': lambda tok: tok if tok.isName else None,
-    '%op%': lambda tok: tok if tok.isOp else None,
-    '%or%': lambda tok: tok if tok.str == '|' else None,
-    '%oror%': lambda tok: tok if tok.str == '||' else None,
-    '%var%': lambda tok: tok if tok.variable else None,
-    '(*)': lambda tok: tok.link if tok.str == '(' else None,
-    '[*]': lambda tok: tok.link if tok.str == '[' else None,
-    '{*}': lambda tok: tok.link if tok.str == '{' else None,
-    '<*>': lambda tok: tok.link if tok.str == '<' and tok.link else None,
-}
-
-def match_atom(token, p):
-    if not token:
-        return None
-    if not p:
-        return None
-    if token.str == p:
-        return token
-    if p in ['!', '|', '||', '%', '!=', '*']:
-        return None
-    if p in patterns:
-        return patterns[p](token)
-    if '|' in p:
-        for x in p.split('|'):
-            t = match_atom(token, x)
-            if t:
-                return t
-    elif p.startswith('!'):
-        t = match_atom(token, p[1:])
-        if not t:
-            return token
-    elif p.startswith('*'):
-        a = p[1:]
-        for t in forward(token, skip_links=['(', '[', '<']):
-            if match_atom(t, a):
-                return t
-    return None
-
-class MatchResult:
-    def __init__(self, matches, bindings=None, keys=None):
-        self.__dict__.update(bindings or {})
-        self._matches = matches
-        self._keys = keys or []
-
-    def __bool__(self):
-        return self._matches
-
-    def __nonzero__(self):
-        return self._matches
-
-    def __getattr__(self, k):
-        if k in self._keys:
-            return None
-        else:
-            raise AttributeError
-
-def bind_split(s):
-    if '@' in s:
-        p = s.partition('@')
-        return (p[0], p[2])
-    return (s, None)
-
-def match(token, pattern):
-    if not pattern:
-        return MatchResult(False)
-    end = None
-    bindings = {}
-    words = [bind_split(word) for word in pattern.split()]
-    for p, b in words:
-        t = match_atom(token, p)
-        if b:
-            bindings[b] = token
-        if not t:
-            return MatchResult(False, keys=[xx for pp, xx in words]+['end'])
-        end = t
-        token = t.next
-    bindings['end'] = end
-    return MatchResult(True, bindings=bindings)
+import cppcheck, itertools
+from cppcheckdata import simpleMatch, match
 
 def skipTokenMatches(tokens, skip=None):
     for tok in tokens:
@@ -139,7 +22,7 @@ def getInnerLink(token):
         return []
     if not token.link:
         return []
-    return forward(token.next, token.link)
+    return token.next.forward(token.link)
 
 def getVariableDecl(var):
     if not var:
@@ -147,17 +30,19 @@ def getVariableDecl(var):
     end = var.typeEndToken
     if end:
         end = end.next
-    return forward(var.typeStartToken, end)
+    return var.typeStartToken.forward(end)
 
 @cppcheck.checker
 def AvoidBranchingStatementAsLastInLoop(cfg, data):
     for token in cfg.tokenlist:
         end = match(token, "for|while (*) {*}").end
-        stmt = tokAt(end, -2)
+        if not end:
+            continue
+        stmt = end.tokAt(-2)
         if not match(stmt, "%any% ; }"):
             continue
         if not match(stmt, "break|continue"):
-            stmt = astTop(stmt)
+            stmt = stmt.astTop()
         if match(stmt, "break|continue|return"):
             cppcheck.reportError(stmt, "style", "Branching statement as the last statement inside a loop is very confusing.")
 
@@ -227,10 +112,13 @@ def EmptyWhileStatement(cfg, data):
 @cppcheck.checker
 def ForLoopShouldBeWhileLoop(cfg, data):
     for token in cfg.tokenlist:
-        if not match(token, "for ( ; !;"):
+        if not match(token, "for ( ; !!;"):
+            continue
+        # Skip empty for loops
+        if match(token, "for (*) { }"):
             continue
         end = token.next.link
-        if not match(tokAt(end, -1), "; )"):
+        if not match(end.tokAt(-1), "; )"):
             continue
         cppcheck.reportError(token, "style", "For loop should be written as a while loop.")
 
@@ -245,7 +133,7 @@ def GotoStatement(cfg, data):
 def InvertedLogic(cfg, data):
     for token in cfg.tokenlist:
         cond = None
-        if match(token, "if (*) {*} else { !if"):
+        if match(token, "if (*) {*} else { !!if"):
             cond = token.next.astOperand2
         elif match(token, "?"):
             cond = token.astOperand1
@@ -308,7 +196,7 @@ def RedundantIfStatement(cfg, data):
 @cppcheck.checker
 def RedundantLocalVariable(cfg, data):
     for token in cfg.tokenlist:
-        m = match(token, "%var%@decl ; %var%@assign = *; return %var%@returned ;")
+        m = match(token, "%var%@decl ; %var%@assign = **; return %var%@returned ;")
         if not m:
             continue
         if m.decl.varId != m.assign.varId:
@@ -323,11 +211,11 @@ def UnnecessaryElseStatement(cfg, data):
         m = match(token, "if (*) {*}@block else@else_statement {")
         if not m:
             continue
-        stmt = tokAt(m.block.link, -2)
+        stmt = m.block.link.tokAt(-2)
         if not match(stmt, "%any% ; }"):
             continue
         if not match(stmt, "break|continue"):
-            stmt = astTop(stmt)
+            stmt = stmt.astTop()
         if not match(stmt, "break|continue|return|throw"):
             continue
         cppcheck.reportError(m.else_statement, "style", "Else statement is not necessary.")
@@ -341,9 +229,9 @@ def UnnecessaryEmptyCondition(cfg, data):
         cond = m.if_cond.astOperand2
         if match(cond, "!"):
             cond = cond.astOperand1
-        if not match(tokAt(cond, -2), ". empty ("):
+        if not match(cond.tokAt(-2), ". empty ("):
             continue
-        container = tokAt(cond, -2).astOperand1
+        container = cond.tokAt(-2).astOperand1
         if not container.varId:
             continue
         if not match(m.for_cond.astOperand2, ":"):
