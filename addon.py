@@ -1,4 +1,5 @@
-import cppcheck, itertools
+import cppcheck, itertools, cppcheckdata
+from cppcheckdata import simpleMatch
 
 def forward(token, end=None, skip_links=None):
     while token and token != end:
@@ -330,4 +331,32 @@ def UnnecessaryElseStatement(cfg, data):
         if not match(stmt, "break|continue|return|throw"):
             continue
         cppcheck.reportError(m.else_statement, "style", "Else statement is not necessary.")
+
+@cppcheck.checker
+def UnnecessaryEmptyCondition(cfg, data):
+    for token in cfg.tokenlist:
+        m = match(token, "if (*)@if_cond { for (*)@for_cond {*} }")
+        if not m:
+            continue
+        cond = m.if_cond.astOperand2
+        if match(cond, "!"):
+            cond = cond.astOperand1
+        if not match(tokAt(cond, -2), ". empty ("):
+            continue
+        container = tokAt(cond, -2).astOperand1
+        if not container.varId:
+            continue
+        if not match(m.for_cond.astOperand2, ":"):
+            continue
+        container_iter = m.for_cond.astOperand2.astOperand2
+        if container_iter.varId != container.varId:
+            continue
+        cppcheck.reportError(container, "style", "Unnecessary check for empty before for range loop.")
+
+# @cppcheck.checker
+# def useStlAlgorithm(cfg, data):
+#     for token in cfg.tokenlist:
+#         if not match(token, "for ("):
+#             continue
+#         cppcheck.reportError(token, "style", "Considering using algorithm instead.")
 
